@@ -1,0 +1,20 @@
+name: 'Pull Request Checks'
+description: 'A GitHub Action that manages required checks based on GitHub repository rulesets and file changes in pull requests'
+author: 'Artem Panfilov'
+
+inputs:
+  rulesets:
+    description: 'List of ruleset names to process'
+    required: true
+  github-token:
+    description: 'GitHub token'
+    required: false
+    default: ${{ github.token }}
+
+runs:
+  using: 'node20'
+  main: 'dist/index.js'
+
+branding:
+  icon: 'check-circle'
+  color: 'green'
