@@ -56,7 +56,15 @@ async function run(): Promise<void> {
     const requestedRulesetNames = rulesetsInput
       .split('\n')
       .map((line: string) => line.trim())
-      .filter((line: string) => line.length > 0);
+      .filter((line: string) => line.length > 0)
+      .map((line: string) => {
+        // Remove surrounding quotes (single or double)
+        if ((line.startsWith("'") && line.endsWith("'")) || 
+            (line.startsWith('"') && line.endsWith('"'))) {
+          return line.slice(1, -1);
+        }
+        return line;
+      });
 
     core.info(`Requested rulesets: ${requestedRulesetNames.join(', ')}`);
 
@@ -223,18 +231,25 @@ function findWorkflowWithJob(
           return { file: basename(file), config };
         }
         
+        // Normalize the job name for comparison
+        const normalizedJobName = jobName.trim().toLowerCase().replace(/[\s_-]+/g, ' ');
+        
         // Check if the job name exists with different spacing/formatting
         for (const [key, job] of Object.entries(config.jobs)) {
-          // If job has a name property, use it for comparison
-          if (job && typeof job === 'object' && 'name' in job) {
-            if (job.name === jobName) {
-              return { file: basename(file), config };
-            }
+          // Normalize the key for comparison
+          const normalizedKey = key.trim().toLowerCase().replace(/[\s_-]+/g, ' ');
+          
+          // Check if normalized keys match
+          if (normalizedKey === normalizedJobName) {
+            return { file: basename(file), config };
           }
           
-          // Also check if the key matches when normalized
-          if (key === jobName || key.replace(/[\s_-]+/g, ' ').trim() === jobName.trim()) {
-            return { file: basename(file), config };
+          // If job has a name property, use it for comparison
+          if (job && typeof job === 'object' && 'name' in job) {
+            const normalizedJobNameProp = String(job.name).trim().toLowerCase().replace(/[\s_-]+/g, ' ');
+            if (normalizedJobNameProp === normalizedJobName) {
+              return { file: basename(file), config };
+            }
           }
         }
       }

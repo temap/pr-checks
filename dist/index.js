@@ -60,7 +60,15 @@ async function run() {
         const requestedRulesetNames = rulesetsInput
             .split('\n')
             .map((line) => line.trim())
-            .filter((line) => line.length > 0);
+            .filter((line) => line.length > 0)
+            .map((line) => {
+            // Remove surrounding quotes (single or double)
+            if ((line.startsWith("'") && line.endsWith("'")) ||
+                (line.startsWith('"') && line.endsWith('"'))) {
+                return line.slice(1, -1);
+            }
+            return line;
+        });
         core.info(`Requested rulesets: ${requestedRulesetNames.join(', ')}`);
         // Fetch all repository rulesets
         core.info('Fetching repository rulesets...');
@@ -187,8 +195,29 @@ function findWorkflowWithJob(workflowFiles, jobName) {
         try {
             const content = (0, fs_1.readFileSync)(file, 'utf8');
             const config = yaml.load(content);
-            if (config.jobs && jobName in config.jobs) {
-                return { file: (0, path_1.basename)(file), config };
+            if (config.jobs) {
+                // Check for exact match first
+                if (jobName in config.jobs) {
+                    return { file: (0, path_1.basename)(file), config };
+                }
+                // Normalize the job name for comparison
+                const normalizedJobName = jobName.trim().toLowerCase().replace(/[\s_-]+/g, ' ');
+                // Check if the job name exists with different spacing/formatting
+                for (const [key, job] of Object.entries(config.jobs)) {
+                    // Normalize the key for comparison
+                    const normalizedKey = key.trim().toLowerCase().replace(/[\s_-]+/g, ' ');
+                    // Check if normalized keys match
+                    if (normalizedKey === normalizedJobName) {
+                        return { file: (0, path_1.basename)(file), config };
+                    }
+                    // If job has a name property, use it for comparison
+                    if (job && typeof job === 'object' && 'name' in job) {
+                        const normalizedJobNameProp = String(job.name).trim().toLowerCase().replace(/[\s_-]+/g, ' ');
+                        if (normalizedJobNameProp === normalizedJobName) {
+                            return { file: (0, path_1.basename)(file), config };
+                        }
+                    }
+                }
             }
         }
         catch (error) {
