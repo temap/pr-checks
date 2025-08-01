@@ -217,8 +217,26 @@ function findWorkflowWithJob(
       const content = readFileSync(file, 'utf8');
       const config = yaml.load(content) as WorkflowConfig;
 
-      if (config.jobs && jobName in config.jobs) {
-        return { file: basename(file), config };
+      if (config.jobs) {
+        // Check for exact match first
+        if (jobName in config.jobs) {
+          return { file: basename(file), config };
+        }
+        
+        // Check if the job name exists with different spacing/formatting
+        for (const [key, job] of Object.entries(config.jobs)) {
+          // If job has a name property, use it for comparison
+          if (job && typeof job === 'object' && 'name' in job) {
+            if (job.name === jobName) {
+              return { file: basename(file), config };
+            }
+          }
+          
+          // Also check if the key matches when normalized
+          if (key === jobName || key.replace(/[\s_-]+/g, ' ').trim() === jobName.trim()) {
+            return { file: basename(file), config };
+          }
+        }
       }
     } catch (error) {
       core.warning(`Failed to parse workflow file ${file}: ${error}`);
