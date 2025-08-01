@@ -141,7 +141,26 @@ async function run() {
                 core.info(`No path filters defined for workflow with job '${check}'`);
                 continue;
             }
-            const matchesFilter = changedPaths.some((changedPath) => pathFilters.some(filter => (0, minimatch_1.minimatch)(changedPath, filter)));
+            const matchesFilter = changedPaths.some((changedPath) => {
+                let isIncluded = false;
+                // Process filters in order - negations override previous matches
+                for (const filter of pathFilters) {
+                    if (filter.startsWith('!')) {
+                        // Negation pattern - remove the ! and check if it matches
+                        const negationPattern = filter.slice(1);
+                        if ((0, minimatch_1.minimatch)(changedPath, negationPattern)) {
+                            isIncluded = false;
+                        }
+                    }
+                    else {
+                        // Inclusion pattern
+                        if ((0, minimatch_1.minimatch)(changedPath, filter)) {
+                            isIncluded = true;
+                        }
+                    }
+                }
+                return isIncluded;
+            });
             if (!matchesFilter) {
                 core.info(`No changed paths match filters for '${check}', marking as successful`);
                 // Create a successful check run

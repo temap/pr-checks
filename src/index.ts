@@ -159,9 +159,27 @@ async function run(): Promise<void> {
         continue;
       }
 
-      const matchesFilter = changedPaths.some((changedPath: string) =>
-        pathFilters.some(filter => minimatch(changedPath, filter))
-      );
+      const matchesFilter = changedPaths.some((changedPath: string) => {
+        let isIncluded = false;
+        
+        // Process filters in order - negations override previous matches
+        for (const filter of pathFilters) {
+          if (filter.startsWith('!')) {
+            // Negation pattern - remove the ! and check if it matches
+            const negationPattern = filter.slice(1);
+            if (minimatch(changedPath, negationPattern)) {
+              isIncluded = false;
+            }
+          } else {
+            // Inclusion pattern
+            if (minimatch(changedPath, filter)) {
+              isIncluded = true;
+            }
+          }
+        }
+        
+        return isIncluded;
+      });
 
       if (!matchesFilter) {
         core.info(`No changed paths match filters for '${check}', marking as successful`);
