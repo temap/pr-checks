@@ -1,6 +1,6 @@
 {
   "name": "pr-checks",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "A GitHub Action that manages required checks based on GitHub repository rulesets and file changes in pull requests",
   "private": true,
   "repository": {
