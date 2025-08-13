@@ -40,7 +40,7 @@ jobs:
   filter-checks:
     runs-on: ubuntu-latest
     permissions:
-      checks: write
+      statuses: write
       pull-requests: read
       contents: read
     steps:
@@ -82,7 +82,7 @@ This action requires the following permissions:
 
 ```yaml
 permissions:
-  checks: write        # To create check runs
+  statuses: write      # To create commit statuses
   pull-requests: read  # To read PR information
   contents: read       # To access repository content and rulesets
 ```

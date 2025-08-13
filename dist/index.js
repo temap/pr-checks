@@ -39,40 +39,58 @@ var __importStar = (this && this.__importStar) || (function () {
         return result;
     };
 })();
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
 Object.defineProperty(exports, "__esModule", ({ value: true }));
+const node_path_1 = __importDefault(__nccwpck_require__(6760));
+const node_fs_1 = __importDefault(__nccwpck_require__(3024));
+const yaml = __importStar(__nccwpck_require__(4281));
 const core = __importStar(__nccwpck_require__(7484));
 const github = __importStar(__nccwpck_require__(3228));
-const yaml = __importStar(__nccwpck_require__(4281));
-const fs_1 = __nccwpck_require__(9896);
-const path_1 = __nccwpck_require__(6928);
 const minimatch_1 = __nccwpck_require__(6507);
+async function createCommitStatusWithRetry(octokit, params, maxRetries = 3) {
+    let lastError;
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+            await octokit.rest.repos.createCommitStatus(params);
+            core.info(`Successfully created status for '${params.context}' on attempt ${attempt}`);
+            return;
+        }
+        catch (error) {
+            lastError = error;
+            core.warning(`Failed to create status for '${params.context}' on attempt ${attempt}/${maxRetries}: ${lastError.message}`);
+            if (attempt < maxRetries) {
+                // Wait before retrying (exponential backoff: 1s, 2s, 4s)
+                const waitTime = Math.pow(2, attempt - 1) * 1000;
+                core.info(`Waiting ${waitTime}ms before retry...`);
+                await new Promise(resolve => setTimeout(resolve, waitTime));
+            }
+        }
+    }
+    throw new Error(`Failed to create status for '${params.context}' after ${maxRetries} attempts: ${lastError?.message}`);
+}
 async function run() {
     try {
+        const githubToken = core.getInput('github-token') || process.env.GITHUB_TOKEN;
         const rulesetsInput = core.getInput('rulesets', { required: true });
-        const githubToken = core.getInput('github-token', { required: true });
+        if (!githubToken) {
+            throw new Error('GitHub token is required. Please provide it via github-token input or GITHUB_TOKEN environment variable.');
+        }
         const octokit = github.getOctokit(githubToken);
         const context = github.context;
-        if (context.eventName !== 'pull_request') {
-            core.info('This action only runs on pull_request events');
+        if (context.eventName !== 'pull_request' || !context.payload.pull_request) {
+            core.info('This action support pull_request events only');
             return;
         }
         // Parse ruleset names from input
         const requestedRulesetNames = rulesetsInput
             .split('\n')
-            .map((line) => line.trim())
-            .filter((line) => line.length > 0)
-            .map((line) => {
-            // Remove surrounding quotes (single or double)
-            if ((line.startsWith("'") && line.endsWith("'")) ||
-                (line.startsWith('"') && line.endsWith('"'))) {
-                return line.slice(1, -1);
-            }
-            return line;
-        });
+            .map(line => line.trim())
+            .filter(line => line.length > 0);
         core.info(`Requested rulesets: ${requestedRulesetNames.join(', ')}`);
-        // Fetch all repository rulesets
         core.info('Fetching repository rulesets...');
-        const { data: allRulesets } = await octokit.request('GET /repos/{owner}/{repo}/rulesets', {
+        const allRulesets = await octokit.paginate(octokit.rest.repos.getRepoRulesets, {
             owner: context.repo.owner,
             repo: context.repo.repo,
             includes_parents: true
@@ -80,12 +98,10 @@ async function run() {
         // Filter rulesets by requested names
         const rulesets = allRulesets.filter(ruleset => requestedRulesetNames.includes(ruleset.name));
         core.info(`Found ${rulesets.length} matching rulesets out of ${allRulesets.length} total`);
-        // Extract all required status checks from rulesets
         const allChecks = new Set();
         for (const ruleset of rulesets) {
-            core.info(`Processing ruleset: ${ruleset.name} (ID: ${ruleset.id})`);
-            // Fetch detailed ruleset information
-            const { data: rulesetDetails } = await octokit.request('GET /repos/{owner}/{repo}/rulesets/{ruleset_id}', {
+            core.info(`Processing ruleset: ${ruleset.name}`);
+            const { data: rulesetDetails } = await octokit.rest.repos.getRepoRuleset({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 ruleset_id: ruleset.id
@@ -95,6 +111,7 @@ async function run() {
                 for (const rule of rulesetDetails.rules) {
                     if (rule.type === 'required_status_checks' && rule.parameters?.required_status_checks) {
                         for (const check of rule.parameters.required_status_checks) {
+                            console.log(check);
                             allChecks.add(check.context);
                             core.info(`  - Found required check: ${check.context}`);
                         }
@@ -102,89 +119,80 @@ async function run() {
                 }
             }
         }
-        const checks = Array.from(allChecks);
-        core.info(`Total required checks found: ${checks.join(', ')}`);
-        const { data: files } = await octokit.rest.pulls.listFiles({
+        const requiredChecks = Array.from(allChecks);
+        core.info(`Found ${requiredChecks.length} required checks: ${requiredChecks.join(', ')}`);
+        const commitSha = context.payload.pull_request.head.sha;
+        core.info(`Processing checks for commit: ${commitSha}`);
+        const workflows = getWorkflowJobs();
+        const files = await octokit.paginate(octokit.rest.pulls.listFiles, {
             owner: context.repo.owner,
             repo: context.repo.repo,
             pull_number: context.payload.pull_request.number,
-            per_page: 100
         });
         const changedPaths = files.map((file) => file.filename);
         core.info(`Changed files in PR: ${changedPaths.join(', ')}`);
-        const workflowsDir = '.github/workflows';
-        const workflowFiles = getWorkflowFiles(workflowsDir);
-        for (const check of checks) {
-            const workflow = findWorkflowWithJob(workflowFiles, check);
-            if (!workflow) {
-                // Job not found in any workflow, mark as success
-                core.info(`No workflow found with job '${check}', marking as successful`);
-                await octokit.rest.checks.create({
+        for (const check of requiredChecks) {
+            const workflowEntry = Object.values(workflows).find(w => w.jobs.includes(check));
+            if (!workflowEntry) {
+                core.info(`No workflow found with job '${check}', marking as successful for commit ${commitSha}`);
+                await createCommitStatusWithRetry(octokit, {
                     owner: context.repo.owner,
                     repo: context.repo.repo,
-                    name: check,
-                    head_sha: context.payload.pull_request.head.sha,
-                    status: 'completed',
-                    conclusion: 'success',
-                    output: {
-                        title: 'Check marked as successful',
-                        summary: `This check was automatically marked as successful because no workflow with job '${check}' was found in the repository.`
-                    }
+                    sha: commitSha,
+                    state: 'success',
+                    context: check,
+                    description: `No workflow with job '${check}' found in repository`
                 });
-                core.info(`Successfully created check run for '${check}'`);
+                core.info(`Status created for '${check}' on commit ${commitSha}`);
                 continue;
             }
-            core.info(`Found workflow for check '${check}': ${workflow.file}`);
+            core.info(`Found workflow for check '${check}': ${workflowEntry.file}`);
             // Check if any changed paths match the workflow's path filters
-            const pathFilters = workflow.config.on?.pull_request?.paths || [];
+            const pathFilters = workflowEntry.config.on?.pull_request?.paths || [];
             if (pathFilters.length === 0) {
                 core.info(`No path filters defined for workflow with job '${check}'`);
                 continue;
             }
             const matchesFilter = changedPaths.some((changedPath) => {
-                let isIncluded = false;
-                // Process filters in order - negations override previous matches
-                for (const filter of pathFilters) {
-                    if (filter.startsWith('!')) {
-                        // Negation pattern - remove the ! and check if it matches
-                        const negationPattern = filter.slice(1);
-                        if ((0, minimatch_1.minimatch)(changedPath, negationPattern)) {
-                            isIncluded = false;
-                        }
-                    }
-                    else {
-                        // Inclusion pattern
-                        if ((0, minimatch_1.minimatch)(changedPath, filter)) {
-                            isIncluded = true;
-                        }
-                    }
+                // Separate positive and negative patterns
+                const positiveFilters = pathFilters.filter((f) => !f.startsWith('!'));
+                const negativeFilters = pathFilters.filter((f) => f.startsWith('!')).map((f) => f.slice(1));
+                // If there are no positive filters, nothing can match
+                if (positiveFilters.length === 0) {
+                    return false;
                 }
-                return isIncluded;
+                // Check if path matches any positive pattern
+                const matchesPositive = positiveFilters.some((filter) => (0, minimatch_1.minimatch)(changedPath, filter));
+                // If it doesn't match any positive pattern, it doesn't match
+                if (!matchesPositive) {
+                    return false;
+                }
+                // Check if path is excluded by any negative pattern
+                const excludedByNegative = negativeFilters.some((filter) => (0, minimatch_1.minimatch)(changedPath, filter));
+                // Path matches if it matches positive patterns and is not excluded
+                return !excludedByNegative;
             });
             if (!matchesFilter) {
-                core.info(`No changed paths match filters for '${check}', marking as successful`);
-                // Create a successful check run
-                await octokit.rest.checks.create({
+                core.info(`No changed paths match filters for '${check}', marking as successful for commit ${commitSha}`);
+                // Create a successful status
+                await createCommitStatusWithRetry(octokit, {
                     owner: context.repo.owner,
                     repo: context.repo.repo,
-                    name: check,
-                    head_sha: context.payload.pull_request.head.sha,
-                    status: 'completed',
-                    conclusion: 'success',
-                    output: {
-                        title: 'Check skipped due to path filters',
-                        summary: `This check was automatically marked as successful because no changed files match the ${workflow.file} workflow path filters.\n\nPath filters: ${pathFilters.join(', ')}`
-                    }
+                    sha: commitSha,
+                    state: 'success',
+                    context: check,
+                    description: `Skipped: no files match ${workflowEntry.file} path filters`
                 });
-                core.info(`Successfully created check run for '${check}'`);
+                core.info(`Status created for '${check}' on commit ${commitSha}`);
             }
             else {
-                core.info(`Changed paths match filters for '${check}', check will run normally`);
+                core.info(`Changed paths match filters for '${check}' on commit ${commitSha}, check will run normally`);
             }
         }
     }
     catch (error) {
         if (error instanceof Error) {
+            core.error(`Action failed: ${error.message}`);
             core.setFailed(error.message);
         }
         else {
@@ -192,58 +200,27 @@ async function run() {
         }
     }
 }
-function getWorkflowFiles(dir) {
-    const files = [];
+function getWorkflowJobs() {
+    const workflowJobs = {};
+    const workflowDir = node_path_1.default.join(process.cwd(), '.github', 'workflows');
     try {
-        const entries = (0, fs_1.readdirSync)(dir);
-        for (const entry of entries) {
-            const fullPath = (0, path_1.join)(dir, entry);
-            const stat = (0, fs_1.statSync)(fullPath);
-            if (stat.isFile() && (entry.endsWith('.yml') || entry.endsWith('.yaml'))) {
-                files.push(fullPath);
-            }
+        const entries = node_fs_1.default.readdirSync(workflowDir);
+        const workflowFiles = entries.filter(entry => entry.endsWith('.yml') || entry.endsWith('.yaml'));
+        for (const workflowFile of workflowFiles) {
+            const content = node_fs_1.default.readFileSync(node_path_1.default.join(workflowDir, workflowFile), 'utf8');
+            const config = yaml.load(content);
+            const jobs = config.jobs || {};
+            workflowJobs[workflowFile] = {
+                file: workflowFile,
+                jobs: Object.keys(jobs).map(job => jobs[job] ? jobs[job].name || job : job),
+                config: config
+            };
         }
     }
     catch (error) {
-        core.warning(`Failed to read workflow directory: ${error}`);
+        core.warning(`Failed to read workflows: ${error}`);
     }
-    return files;
-}
-function findWorkflowWithJob(workflowFiles, jobName) {
-    for (const file of workflowFiles) {
-        try {
-            const content = (0, fs_1.readFileSync)(file, 'utf8');
-            const config = yaml.load(content);
-            if (config.jobs) {
-                // Check for exact match first
-                if (jobName in config.jobs) {
-                    return { file: (0, path_1.basename)(file), config };
-                }
-                // Normalize the job name for comparison
-                const normalizedJobName = jobName.trim().toLowerCase().replace(/[\s_-]+/g, ' ');
-                // Check if the job name exists with different spacing/formatting
-                for (const [key, job] of Object.entries(config.jobs)) {
-                    // Normalize the key for comparison
-                    const normalizedKey = key.trim().toLowerCase().replace(/[\s_-]+/g, ' ');
-                    // Check if normalized keys match
-                    if (normalizedKey === normalizedJobName) {
-                        return { file: (0, path_1.basename)(file), config };
-                    }
-                    // If job has a name property, use it for comparison
-                    if (job && typeof job === 'object' && 'name' in job) {
-                        const normalizedJobNameProp = String(job.name).trim().toLowerCase().replace(/[\s_-]+/g, ' ');
-                        if (normalizedJobNameProp === normalizedJobName) {
-                            return { file: (0, path_1.basename)(file), config };
-                        }
-                    }
-                }
-            }
-        }
-        catch (error) {
-            core.warning(`Failed to parse workflow file ${file}: ${error}`);
-        }
-    }
-    return null;
+    return workflowJobs;
 }
 run();
 //# sourceMappingURL=index.js.map
@@ -7648,7 +7625,7 @@ module.exports.types = {
   set:       __nccwpck_require__(8758),
   timestamp: __nccwpck_require__(8966),
   bool:      __nccwpck_require__(7296),
-  int:       __nccwpck_require__(4652),
+  int:       __nccwpck_require__(2271),
   merge:     __nccwpck_require__(6854),
   omap:      __nccwpck_require__(8649),
   seq:       __nccwpck_require__(7161),
@@ -10723,7 +10700,7 @@ module.exports = (__nccwpck_require__(9832).extend)({
   implicit: [
     __nccwpck_require__(4333),
     __nccwpck_require__(7296),
-    __nccwpck_require__(4652),
+    __nccwpck_require__(2271),
     __nccwpck_require__(7584)
   ]
 });
@@ -11195,7 +11172,7 @@ module.exports = new Type('tag:yaml.org,2002:float', {
 
 /***/ }),
 
-/***/ 4652:
+/***/ 2271:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 "use strict";
@@ -34399,6 +34376,22 @@ module.exports = require("node:events");
 
 /***/ }),
 
+/***/ 3024:
+/***/ ((module) => {
+
+"use strict";
+module.exports = require("node:fs");
+
+/***/ }),
+
+/***/ 6760:
+/***/ ((module) => {
+
+"use strict";
+module.exports = require("node:path");
+
+/***/ }),
+
 /***/ 7075:
 /***/ ((module) => {
 
@@ -34539,7 +34532,7 @@ const inherits = (__nccwpck_require__(7975).inherits)
 const StreamSearch = __nccwpck_require__(4136)
 
 const PartStream = __nccwpck_require__(612)
-const HeaderParser = __nccwpck_require__(2271)
+const HeaderParser = __nccwpck_require__(4652)
 
 const DASH = 45
 const B_ONEDASH = Buffer.from('-')
@@ -34748,7 +34741,7 @@ module.exports = Dicer
 
 /***/ }),
 
-/***/ 2271:
+/***/ 4652:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 "use strict";
