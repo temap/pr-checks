@@ -171,7 +171,7 @@ async function run(): Promise<void> {
                 }
 
                 // Check if path matches any positive pattern
-                const matchesPositive = positiveFilters.some((filter: string) => minimatch(changedPath, filter));
+                const matchesPositive = positiveFilters.some((filter: string) => minimatch(changedPath, filter, {dot: true}));
 
                 // If it doesn't match any positive pattern, it doesn't match
                 if (!matchesPositive) {
@@ -180,7 +180,7 @@ async function run(): Promise<void> {
 
                 // Check if path is excluded by any negative pattern
                 const excludedByNegative = negativeFilters.some((filter: string) =>
-                    minimatch(changedPath, filter));
+                    minimatch(changedPath, filter, {dot: true}));
 
                 // Path matches if it matches positive patterns and is not excluded
                 return !excludedByNegative;

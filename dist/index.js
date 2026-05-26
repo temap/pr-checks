@@ -162,13 +162,13 @@ async function run() {
                     return false;
                 }
                 // Check if path matches any positive pattern
-                const matchesPositive = positiveFilters.some((filter) => (0, minimatch_1.minimatch)(changedPath, filter));
+                const matchesPositive = positiveFilters.some((filter) => (0, minimatch_1.minimatch)(changedPath, filter, { dot: true }));
                 // If it doesn't match any positive pattern, it doesn't match
                 if (!matchesPositive) {
                     return false;
                 }
                 // Check if path is excluded by any negative pattern
-                const excludedByNegative = negativeFilters.some((filter) => (0, minimatch_1.minimatch)(changedPath, filter));
+                const excludedByNegative = negativeFilters.some((filter) => (0, minimatch_1.minimatch)(changedPath, filter, { dot: true }));
                 // Path matches if it matches positive patterns and is not excluded
                 return !excludedByNegative;
             });
